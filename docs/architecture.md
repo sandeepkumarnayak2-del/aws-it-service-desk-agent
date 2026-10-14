@@ -1,18 +1,19 @@
-# Architecture
+Architecture
 
-## Overview
+Overview
 
-The service desk uses FastAPI for the API boundary and LangGraph for stateful
-multi-agent orchestration.
+The Enterprise AI Service Desk uses FastAPI as the API layer and LangGraph to orchestrate the different agents and maintain workflow state.
 
-```text
+The system combines multi-agent routing, internal knowledge retrieval, memory, MCP-based tools, and human approval for actions that can change data.
+
 User
   |
   v
 FastAPI
   |
-  +-- Authentication / RBAC
-  +-- Validation / Guardrails / Rate Limit
+  +-- Authentication / Authorization
+  +-- Validation / Guardrails
+  +-- Rate Limiting
   |
   v
 LangGraph
@@ -20,74 +21,273 @@ LangGraph
   v
 Supervisor Agent
   |
-  v
-Recall Long-term Memory
-  |
-  +-- Knowledge Agent ----> Internal RAG / Chroma
+  +-- Knowledge Agent ----> Internal RAG
   |          |
-  |          +-- insufficient evidence --> Investigation Agent
-  |                                             |
-  |                                             +-- needs action --> Action Agent
+  |          +-- insufficient evidence
+  |                       |
+  |                       v
+  |                Investigation Agent
+  |                       |
+  |                       +-- action required
+  |                                  |
+  |                                  v
+  |                            Action Agent
   |
-  +-- Ticket Agent --------> MCP ---------> Ticket System
+  +-- Ticket Agent -------> MCP -------> Ticket Tools
   |
   +-- General Agent
   |
-  +-- Action Agent --------> Human Approval --> MCP --> Ticket System
-```
+  +-- Action Agent -------> Human Approval
+                                  |
+                                  v
+                                 MCP
+                                  |
+                                  v
+                            Ticket System
 
-## Agent responsibilities
+Agents
 
-- **SupervisorAgent**: LLM-based routing only.
-- **KnowledgeAgent**: enterprise IT knowledge and RAG. It can hand off when internal evidence is insufficient for an investigation request.
-- **InvestigationAgent**: LLM-only analysis after a knowledge handoff. It has **no internet/search tool** and must not claim external verification.
-- **TicketAgent**: reads existing tickets through MCP and respects authenticated identity/role.
-- **ActionAgent**: prepares consequential ticket actions. It never executes them directly. The stored plan is resumed through the HITL checkpoint only after approval.
-- **GeneralAgent**: handles greetings and general non-service-desk questions.
+Supervisor Agent
 
-## Agentic handoff
+The Supervisor is responsible for deciding which agent should handle the current request.
 
-The key multi-agent workflow is:
+It uses the LLM for routing and does not perform the actual business operation itself.
 
-```text
+Typical routes include:
+
+* Knowledge Agent
+* Ticket Agent
+* Investigation Agent
+* Action Agent
+* General Agent
+
+Knowledge Agent
+
+The Knowledge Agent handles internal IT questions.
+
+It uses the internal RAG system to retrieve relevant company documentation and uses the retrieved information to answer the user.
+
+If the available documentation is not sufficient and the user has requested further investigation, the Knowledge Agent can hand off to the Investigation Agent.
+
+The agent should not invent company-specific procedures or information that is not supported by the available documentation.
+
+Investigation Agent
+
+The Investigation Agent performs additional model-based analysis when the internal documentation is not sufficient.
+
+It does not have an internet or web-search tool.
+
+Therefore, it must clearly distinguish general model knowledge from information that has been verified against company documentation.
+
+Ticket Agent
+
+The Ticket Agent handles requests to view existing tickets.
+
+Ticket operations are performed through MCP tools, and access is restricted according to the authenticated user’s identity and permissions.
+
+Action Agent
+
+The Action Agent handles actions that can change data, such as creating a support ticket.
+
+It first prepares an action plan and creates a pending approval.
+
+The workflow is then interrupted until a human approves or rejects the action.
+
+If approved, the LangGraph workflow resumes from the stored checkpoint and the action is executed through MCP.
+
+If rejected, the action is not executed.
+
+General Agent
+
+The General Agent handles greetings and general questions that do not require the service desk knowledge base or ticket system.
+
+⸻
+
+Agentic Handoff
+
+One of the main agentic workflows is the following:
+
 Supervisor
     |
     v
 Knowledge Agent
     |
-    +-- sufficient evidence --> answer
+    +-- sufficient evidence --> Answer
     |
     +-- insufficient evidence
               |
               v
        Investigation Agent
               |
-              +-- no action --> answer
+              +-- no action required --> Answer
               |
-              +-- action requested
+              +-- action required
                        |
                        v
                  Action Agent
                        |
                        v
-                 Human Approval
-                       |
-                       +-- reject --> end
-                       |
-                       +-- approve --> MCP --> ticket
-```
+                Human Approval
+                   /        \
+               Reject       Approve
+                 |             |
+                 v             v
+                End           MCP
+                                |
+                                v
+                          Ticket Operation
 
-This is intentionally LLM-only for investigation. There is no Tavily, web
-search API, or external search dependency.
+This allows the system to move between specialized agents based on the current request instead of sending every request through the same workflow.
 
-## Memory
+The Investigation Agent is intentionally LLM-only. There is no Tavily, web-search API, or external search dependency in this workflow.
 
-- Short-term memory: LangGraph state/checkpoint keyed by the user's thread.
-- Long-term memory: user-scoped SQL `Memory` records.
+⸻
 
-## Production notes
+RAG
 
-Local development uses SQLite for application/checkpoint state. Production
-should use PostgreSQL-backed persistence for durable workflow state and
-application data. A persistent vector store should be used instead of an
-`/tmp` Chroma directory for production RAG.
+The knowledge workflow uses an internal document collection for IT support information.
+
+The current knowledge base includes topics such as:
+
+* VPN
+* Company laptops
+* Outlook
+* Passwords
+* Security
+
+The retrieval process includes query rewriting and relevance checking before the Knowledge Agent generates its response.
+
+The system is designed to avoid presenting unsupported information as company policy.
+
+⸻
+
+MCP
+
+MCP is used as the tool integration layer between the agents and ticket-related operations.
+
+The basic flow is:
+
+Agent
+  |
+  v
+MCP Client
+  |
+  | Streamable HTTP
+  v
+MCP Server
+  |
+  v
+Ticket Tool
+  |
+  v
+Database
+
+This keeps the agent logic separate from the implementation of the underlying ticket operations.
+
+Examples of MCP operations include:
+
+create_ticket_for_user
+search_my_tickets
+get_ticket_for_user
+
+Ticket creation also uses an idempotency key so that a retried operation does not unintentionally create duplicate tickets.
+
+⸻
+
+Memory
+
+The application uses two types of memory.
+
+Short-term memory
+
+LangGraph checkpointing maintains the state of an active conversation and workflow.
+
+The checkpoint is associated with the conversation thread_id.
+
+This allows an interrupted workflow, such as a human approval request, to resume with the correct state.
+
+Long-term memory
+
+Long-term user-specific information is stored in the SQL Memory table.
+
+Only explicit user preferences are intended to be stored, and the memory layer checks for sensitive information before saving it.
+
+⸻
+
+Human Approval
+
+Actions that can modify data are not executed immediately.
+
+For example:
+
+User requests ticket
+        |
+        v
+Action Agent
+        |
+        v
+Prepare action
+        |
+        v
+Create approval
+        |
+        v
+LangGraph interrupt
+        |
+        +------ Reject ------> End
+        |
+        +------ Approve -----> Resume
+                                  |
+                                  v
+                                 MCP
+
+This provides a human-in-the-loop control point before a consequential operation is executed.
+
+⸻
+
+Security and Reliability
+
+The API includes several supporting controls:
+
+* Authentication and role-based authorization
+* Request validation
+* Prompt-injection guardrails
+* Rate limiting
+* User-scoped ticket access
+* Idempotent ticket creation
+* Structured application logging
+* Audit logging
+* Application metrics
+
+These controls are separate from the agent reasoning layer and protect the overall application.
+
+⸻
+
+Deployment
+
+For local development, the application can use SQLite for application data and local checkpointing.
+
+The production deployment uses PostgreSQL for persistent application data.
+
+The MCP server is deployed separately from the API and communicates with the API through Streamable HTTP.
+
+The current RAG implementation uses the application’s retrieval store. For a larger production deployment, the retrieval layer can be moved to a managed or persistent vector/search store rather than relying on local filesystem storage.
+
+⸻
+
+Main Technology Stack
+
+Area	Technology
+API	FastAPI
+Agent orchestration	LangGraph
+LLM framework	LangChain
+LLM	Groq / Ollama
+RAG	Internal document retrieval
+Tool integration	MCP
+Database	PostgreSQL / SQLite
+Cache	Redis
+Authentication	JWT-based authentication
+Deployment	Docker / Render
+Observability	Structured logs, metrics and audit logs
+
+The overall design separates the AI reasoning layer from the application, database, security, and tool-integration layers. This makes the system easier to extend with additional agents, tools, knowledge sources, and enterprise integrations.

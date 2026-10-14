@@ -15,3 +15,16 @@ __pycache__/
 .DS_Store
 app.zip
 docs.zip
+pass
+# Archives and temporary work
+*.zip
+work/
+*.bak
+*.backup
+
+# Database dumps and backups
+*.sql
+*.dump
+
+# Local task definitions and generated files (review before committing)
+task-definition.json

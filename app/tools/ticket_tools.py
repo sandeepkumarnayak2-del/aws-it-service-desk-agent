@@ -6,7 +6,7 @@ authorization outside the model's control.
 """
 from langchain_core.tools import tool
 from app.tools.tickets import list_tickets, get_ticket, serialize
-
+#Only search and get tickets have normal langchain tool calling as it is safe data
 
 @tool
 def search_my_tickets(username: str = "", role: str = "employee") -> list[dict]:

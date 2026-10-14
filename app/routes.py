@@ -1,6 +1,13 @@
+import os
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import urlparse
+
+import boto3
+import psycopg
+
+from app.agents import graph as graph_module
 
 from fastapi import (
     FastAPI,
@@ -8,48 +15,68 @@ from fastapi import (
     HTTPException,
     Request,
 )
+
 from fastapi.middleware.cors import CORSMiddleware
+
 from fastapi.responses import (
     StreamingResponse,
     Response,
     RedirectResponse,
 )
+
 from fastapi.security import OAuth2PasswordRequestForm
+
 from fastapi.staticfiles import StaticFiles
+
 from pydantic import BaseModel, Field
+
 from prometheus_client import (
     generate_latest,
     CONTENT_TYPE_LATEST,
 )
+
 from slowapi.errors import RateLimitExceeded
 
 from app.config import settings
+
 from app.database.db import (
     init_db,
     SessionLocal,
 )
+
 from app.database.seed import seed
+
 from app.database.models import (
     Conversation,
     Approval,
 )
+
 from app.auth.security import (
     authenticate,
     create_token,
     current_user,
 )
+
 from app.security.validation import (
     validate_username,
     validate_message,
     sanitize_input,
 )
+
 from app.security.rate_limit import limiter
-from app.agents.graph import run_agent, resume_agent
+
+from app.agents.graph import (
+    run_agent,
+    resume_agent,
+)
+
 from app.observability.logging import (
     configure_logging,
     logger,
 )
+
 from app.observability.audit import audit
+
 from app.tools.tickets import (
     list_tickets,
     get_ticket,
@@ -87,20 +114,111 @@ async def lifespan(app: FastAPI):
 
     configure_logging()
 
+    # -----------------------------------------------------
+    # Initialize application database
+    # -----------------------------------------------------
+
     init_db()
 
     seed()
 
+    # -----------------------------------------------------
+    # Initialize LangGraph PostgreSQL checkpointer
+    # -----------------------------------------------------
+
+    checkpoint_url = urlparse(
+        graph_module.POSTGRES_CHECKPOINT_URL
+    )
+
+    # -----------------------------------------------------
+    # Determine database authentication method
+    # -----------------------------------------------------
+    #
+    # AWS RDS with IAM authentication:
+    #     RDS_IAM_AUTH=true
+    #
+    # Standard PostgreSQL password authentication:
+    #     RDS_IAM_AUTH=false
+    #
+    # Our current AWS RDS PostgreSQL instance uses
+    # standard password authentication.
+    # -----------------------------------------------------
+
+    if settings.rds_iam_auth:
+
+        rds_client = boto3.client(
+            "rds",
+            region_name=settings.aws_region,
+        )
+
+        password = rds_client.generate_db_auth_token(
+            DBHostname=checkpoint_url.hostname,
+            Port=checkpoint_url.port or 5432,
+            DBUsername=checkpoint_url.username or "postgres",
+        )
+
+    else:
+
+        password = os.getenv("DB_PASSWORD")
+
+        if not password:
+            raise RuntimeError(
+                "DB_PASSWORD is not configured"
+            )
+
+    # -----------------------------------------------------
+    # PostgreSQL connection for LangGraph checkpointing
+    # -----------------------------------------------------
+
+    checkpoint_conn = psycopg.connect(
+        host=checkpoint_url.hostname,
+        port=checkpoint_url.port or 5432,
+        user=checkpoint_url.username or "postgres",
+        password=password,
+        dbname=(
+            checkpoint_url.path.lstrip("/")
+            or "postgres"
+        ),
+        sslmode="require",
+        autocommit=True,
+    )
+
+    # -----------------------------------------------------
+    # Create LangGraph PostgreSQL checkpointer
+    # -----------------------------------------------------
+
+    checkpointer = graph_module.PostgresSaver(
+        checkpoint_conn
+    )
+
+    checkpointer.setup()
+
+    graph_module.checkpointer = checkpointer
+
+    graph_module.graph = graph_module.build_graph(
+        checkpointer
+    )
+
+    # -----------------------------------------------------
+    # RAG ingestion
+    # -----------------------------------------------------
+
     try:
+
         from app.rag.ingestion import ingest
 
         ingest()
 
     except Exception as e:
+
         logger.warning(
             "rag_ingestion_failed",
             error=str(e),
         )
+
+    # -----------------------------------------------------
+    # Application is ready
+    # -----------------------------------------------------
 
     yield
 
@@ -163,6 +281,7 @@ app.add_middleware(
     include_in_schema=False,
 )
 def root():
+
     return RedirectResponse("/ui/")
 
 
@@ -175,6 +294,7 @@ async def rate_limit_handler(
     request: Request,
     exc: RateLimitExceeded,
 ):
+
     return Response(
         "Rate limit exceeded",
         status_code=429,
@@ -228,6 +348,7 @@ def login(
     )
 
     if not user:
+
         raise HTTPException(
             401,
             "Invalid credentials",
@@ -334,6 +455,7 @@ def build_thread_id(
     #
     # This prevents two users from sharing the same
     # LangGraph checkpoint namespace.
+
     internal_thread_id = (
         f"{username}:{public_thread_id}"
     )
@@ -369,19 +491,19 @@ async def chat(
     # -----------------------------------------------------
 
     public_thread_id, internal_thread_id = (
-    build_thread_id(
-        user.username,
-        chat_request.thread_id,
+        build_thread_id(
+            user.username,
+            chat_request.thread_id,
+        )
     )
-)
 
     logger.info(
-    "THREAD_DEBUG",
-    username=user.username,
-    request_thread_id=chat_request.thread_id,
-    public_thread_id=public_thread_id,
-    internal_thread_id=internal_thread_id,
-)
+        "THREAD_DEBUG",
+        username=user.username,
+        request_thread_id=chat_request.thread_id,
+        public_thread_id=public_thread_id,
+        internal_thread_id=internal_thread_id,
+    )
 
     # -----------------------------------------------------
     # Run LangGraph agent
@@ -449,7 +571,14 @@ async def chat(
         "search_query": result.get(
             "search_query"
         ),
-        "sources": [d.get("source", "") for d in result.get("documents", []) if d.get("source")],
+        "sources": [
+            d.get("source", "")
+            for d in result.get(
+                "documents",
+                [],
+            )
+            if d.get("source")
+        ],
         "agent": result.get("agent"),
         "handoff": result.get("handoff"),
     }
@@ -696,36 +825,72 @@ def resolve_approval(
     req: ApprovalRequest,
     user=Depends(current_user),
 ):
+
     """Resolve the exact LangGraph approval checkpoint.
 
-    Execution is resumed through the same graph that created the approval. This
-    preserves the Action Agent's approved title, description and priority and
-    keeps the MCP call behind the HITL boundary.
+    Execution is resumed through the same graph that created
+    the approval. This preserves the Action Agent's approved
+    title, description and priority and keeps the MCP call
+    behind the HITL boundary.
     """
+
     db = SessionLocal()
+
     try:
-        approval = db.get(Approval, approval_id)
+
+        approval = db.get(
+            Approval,
+            approval_id,
+        )
+
         if not approval:
-            raise HTTPException(404, "Approval not found")
+
+            raise HTTPException(
+                404,
+                "Approval not found",
+            )
 
         if (
             approval.username != user.username
-            and user.role not in ("helpdesk", "admin")
+            and user.role not in (
+                "helpdesk",
+                "admin",
+            )
         ):
-            raise HTTPException(403, "Not allowed")
+
+            raise HTTPException(
+                403,
+                "Not allowed",
+            )
 
         if approval.status != "pending":
-            return {"status": approval.status}
+
+            return {
+                "status": approval.status
+            }
 
         thread_id = approval.thread_id
+
         if not thread_id:
-            raise HTTPException(409, "Approval has no workflow checkpoint")
+
+            raise HTTPException(
+                409,
+                "Approval has no workflow checkpoint",
+            )
+
     finally:
+
         db.close()
 
     try:
-        result = resume_agent(thread_id, req.approve)
+
+        result = resume_agent(
+            thread_id,
+            req.approve,
+        )
+
     except Exception as exc:
+
         logger.exception(
             "approval_resume_failed",
             approval_id=approval_id,
@@ -733,24 +898,57 @@ def resolve_approval(
             approved=req.approve,
             error_type=type(exc).__name__,
         )
-        raise HTTPException(502, "Unable to resume the approval workflow") from exc
+
+        raise HTTPException(
+            502,
+            "Unable to resume the approval workflow",
+        ) from exc
 
     db = SessionLocal()
-    try:
-        approval = db.get(Approval, approval_id)
-        status = approval.status if approval else "unknown"
 
-        audit_action = "approval_approved" if req.approve else "approval_rejected"
-        audit(user.id, audit_action, str(approval_id))
+    try:
+
+        approval = db.get(
+            Approval,
+            approval_id,
+        )
+
+        status = (
+            approval.status
+            if approval
+            else "unknown"
+        )
+
+        audit_action = (
+            "approval_approved"
+            if req.approve
+            else "approval_rejected"
+        )
+
+        audit(
+            user.id,
+            audit_action,
+            str(approval_id),
+        )
 
         response = {
             "status": status,
-            "response": result.get("response", ""),
+            "response": result.get(
+                "response",
+                "",
+            ),
         }
-        action = result.get("action") or {}
-        if action.get("ticket"):
-            response["ticket"] = action["ticket"]
-        return response
-    finally:
-        db.close()
 
+        action = result.get("action") or {}
+
+        if action.get("ticket"):
+
+            response["ticket"] = (
+                action["ticket"]
+            )
+
+        return response
+
+    finally:
+
+        db.close()

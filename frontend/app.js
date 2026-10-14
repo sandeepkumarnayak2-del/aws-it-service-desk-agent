@@ -31,7 +31,7 @@ const environment = document.getElementById("environment");
 const llmProvider = document.getElementById("llmProvider");
 
 
-// =====================================================
+// =================================================
 // THREAD MANAGEMENT
 // =====================================================
 
@@ -49,10 +49,10 @@ function getOrCreateThread(username) {
         localStorage.getItem(storageKey);
 
     if (!storedThread) {
-
         storedThread =
-            crypto.randomUUID();
-
+            typeof crypto.randomUUID === "function"
+                ? crypto.randomUUID()
+                : `${Date.now()}-${Math.random().toString(36).substring(2, 15)}`;
         localStorage.setItem(
             storageKey,
             storedThread

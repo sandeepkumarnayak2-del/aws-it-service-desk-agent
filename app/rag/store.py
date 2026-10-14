@@ -47,6 +47,7 @@ def search(query, k=5):
     results = []
 
     for index in ranked_indexes[:k]:
+        #no meaningful BM25 score from being returned.
         if scores[index] <= 0:
             continue
 

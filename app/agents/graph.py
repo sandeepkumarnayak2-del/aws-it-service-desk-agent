@@ -1,15 +1,12 @@
 """LangGraph orchestration for the real multi-agent IT service desk."""
 from __future__ import annotations
-
+from langgraph.checkpoint.postgres import PostgresSaver
 import json
-import sqlite3
-from pathlib import Path
 from typing import Literal
-
-from langgraph.checkpoint.sqlite import SqliteSaver
+from app.config import settings
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
-
+from app.config import settings
 from app.agents.agents import (
     ActionAgent,
     GeneralAgent,
@@ -26,11 +23,13 @@ from app.security.guardrails import detect_prompt_injection
 from app.mcp.client import call_tool_sync
 from app.observability.logging import logger
 
-BASE_DIR = Path(__file__).resolve().parents[2]
-_conn = sqlite3.connect(BASE_DIR / "checkpoints.sqlite", check_same_thread=False)
-checkpointer = SqliteSaver(_conn)
+#POSTGRES_CHECKPOINT_URL = "postgresql://localhost/service_desk"
+POSTGRES_CHECKPOINT_URL = settings.checkpoint_database_url or settings.database_url
+checkpointer = None
 
 _agents = None
+
+
 
 
 def _get_agents():
@@ -375,7 +374,7 @@ def route_after_investigation(state: AgentState) -> Literal["plan_action", "end"
     return "plan_action" if state.get("needs_action") else "end"
 
 
-def build_graph():
+def build_graph(checkpointer):
     builder = StateGraph(AgentState)
 
     builder.add_node("supervisor", supervisor_node)
@@ -434,7 +433,7 @@ def build_graph():
     return builder.compile(checkpointer=checkpointer)
 
 
-graph = build_graph()
+graph = None
 
 
 def _normalize(result):

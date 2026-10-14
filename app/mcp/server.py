@@ -6,43 +6,113 @@ Run locally with:
 For Streamable HTTP:
     MCP_TRANSPORT=streamable-http MCP_PORT=8001 python -m app.mcp.server
 """
+
 import os
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
-from app.tools.tickets import list_tickets, get_ticket, create_ticket, serialize
+from app.tools.tickets import (
+    list_tickets,
+    get_ticket,
+    create_ticket,
+    serialize,
+)
 from app.observability.logging import logger
+
 
 MCP_HOST = os.getenv("MCP_HOST", "0.0.0.0")
 MCP_PORT = int(os.getenv("PORT", os.getenv("MCP_PORT", "8001")))
+
+# Configurable allowed hosts.
+# Local development uses the defaults below.
+# AWS/ECS can override this with MCP_ALLOWED_HOSTS.
+allowed_hosts = os.getenv(
+    "MCP_ALLOWED_HOSTS",
+    "localhost:8001,127.0.0.1:8001,host.docker.internal:8001",
+).split(",")
+
+allowed_hosts = [
+    host.strip()
+    for host in allowed_hosts
+    if host.strip()
+]
+
 
 mcp = FastMCP(
     "enterprise-service-desk",
     host=MCP_HOST,
     port=MCP_PORT,
+    transport_security=TransportSecuritySettings(
+        allowed_hosts=allowed_hosts,
+    ),
 )
 
 
 @mcp.tool()
-def search_my_tickets(username: str, role: str = "employee") -> list[dict]:
+def search_my_tickets(
+    username: str,
+    role: str = "employee",
+) -> list[dict]:
     """List tickets visible to the authenticated user."""
-    logger.info("mcp_server_tool_call", tool="search_my_tickets", username=username, role=role)
-    result = [serialize(t) for t in list_tickets(username, role)]
-    logger.info("mcp_server_tool_result", tool="search_my_tickets", count=len(result))
+
+    logger.info(
+        "mcp_server_tool_call",
+        tool="search_my_tickets",
+        username=username,
+        role=role,
+    )
+
+    result = [
+        serialize(t)
+        for t in list_tickets(username, role)
+    ]
+
+    logger.info(
+        "mcp_server_tool_result",
+        tool="search_my_tickets",
+        count=len(result),
+    )
+
     return result
 
 
 @mcp.tool()
-def get_ticket_for_user(ticket_id: int, username: str, role: str = "employee") -> dict:
+def get_ticket_for_user(
+    ticket_id: int,
+    username: str,
+    role: str = "employee",
+) -> dict:
     """Get one ticket after application-layer authorization."""
-    logger.info("mcp_server_tool_call", tool="get_ticket_for_user", ticket_id=ticket_id, username=username, role=role)
-    ticket = get_ticket(ticket_id, username, role)
+
+    logger.info(
+        "mcp_server_tool_call",
+        tool="get_ticket_for_user",
+        ticket_id=ticket_id,
+        username=username,
+        role=role,
+    )
+
+    ticket = get_ticket(
+        ticket_id,
+        username,
+        role,
+    )
+
     if ticket == "FORBIDDEN":
         return {"error": "forbidden"}
+
     if not ticket:
         return {"error": "not_found"}
+
     result = serialize(ticket)
-    logger.info("mcp_server_tool_result", tool="get_ticket_for_user", ticket_id=ticket_id)
+
+    logger.info(
+        "mcp_server_tool_result",
+        tool="get_ticket_for_user",
+        ticket_id=ticket_id,
+    )
+
     return result
 
 
@@ -57,10 +127,12 @@ def create_ticket_for_user(
 ) -> dict:
     """Create a ticket for the authenticated user after approval.
 
-    The MCP server is the execution boundary for consequential ticket creation.
-    The caller supplies the already-authenticated application identity and an
-    idempotency key so a retried/resumed workflow cannot create duplicates.
+    The MCP server is the execution boundary for consequential
+    ticket creation. The caller supplies the already-authenticated
+    application identity and an idempotency key so a retried/resumed
+    workflow cannot create duplicates.
     """
+
     logger.info(
         "mcp_server_tool_call",
         tool="create_ticket_for_user",
@@ -72,11 +144,22 @@ def create_ticket_for_user(
 
     if role == "user":
         role = "employee"
-    if role not in {"employee", "helpdesk", "admin"}:
+
+    if role not in {
+        "employee",
+        "helpdesk",
+        "admin",
+    }:
         return {"error": "forbidden"}
+
     if not title.strip() or not description.strip():
         return {"error": "invalid_request"}
-    if priority not in {"low", "medium", "high"}:
+
+    if priority not in {
+        "low",
+        "medium",
+        "high",
+    }:
         return {"error": "invalid_priority"}
 
     ticket = create_ticket(
@@ -86,18 +169,32 @@ def create_ticket_for_user(
         priority,
         idempotency_key=idempotency_key,
     )
+
     result = serialize(ticket)
+
     logger.info(
         "mcp_server_tool_result",
         tool="create_ticket_for_user",
         ticket_id=ticket.id,
     )
+
     return result
 
 
 if __name__ == "__main__":
-    transport = os.getenv("MCP_TRANSPORT", "stdio").lower()
-    if transport in {"streamable-http", "http"}:
-        mcp.run(transport="streamable-http")
+    transport = os.getenv(
+        "MCP_TRANSPORT",
+        "stdio",
+    ).lower()
+
+    if transport in {
+        "streamable-http",
+        "http",
+    }:
+        mcp.run(
+            transport="streamable-http"
+        )
     else:
-        mcp.run(transport="stdio")
+        mcp.run(
+            transport="stdio"
+        )

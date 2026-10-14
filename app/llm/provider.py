@@ -54,19 +54,52 @@ Response style:
 
 #Toke limit,fallback llm
 def get_llm():
-    if settings.llm_provider.lower() == "ollama":
+    provider = settings.llm_provider.lower()
+
+    if provider == "ollama":
         from langchain_ollama import ChatOllama
-        return ChatOllama(model=settings.ollama_model, base_url=settings.ollama_base_url,
-                          temperature=0)
-    if not settings.groq_api_key:
-        raise RuntimeError("GROQ_API_KEY is not configured. Set it in .env or use LLM_PROVIDER=ollama.")
-    from langchain_groq import ChatGroq
-    return ChatGroq(
-    model=settings.groq_model,
-    temperature=0,
-    max_tokens=1000,
-    api_key=settings.groq_api_key,
-)
+
+        return ChatOllama(
+            model=settings.ollama_model,
+            base_url=settings.ollama_base_url,
+            temperature=0,
+        )
+
+    if provider == "bedrock":
+        if not settings.bedrock_model:
+            raise RuntimeError(
+                "BEDROCK_MODEL is not configured. "
+                "Set BEDROCK_MODEL in .env."
+            )
+
+        from langchain_aws import ChatBedrockConverse
+
+        return ChatBedrockConverse(
+            model=settings.bedrock_model,
+            region_name=settings.aws_region,
+            temperature=0,
+            max_tokens=1000,
+        )
+
+    if provider == "groq":
+        if not settings.groq_api_key:
+            raise RuntimeError(
+                "GROQ_API_KEY is not configured. "
+                "Set it in .env or use LLM_PROVIDER=ollama."
+            )
+
+        from langchain_groq import ChatGroq
+
+        return ChatGroq(
+            model=settings.groq_model,
+            temperature=0,
+            max_tokens=1000,
+            api_key=settings.groq_api_key,
+        )
+
+    raise RuntimeError(
+        f"Unsupported LLM_PROVIDER: {settings.llm_provider}"
+    )
 
 
 

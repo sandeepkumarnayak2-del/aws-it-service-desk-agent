@@ -91,12 +91,18 @@ def _unwrap_result(value):
 def _run_async(coro):
     """Run an async MCP operation from synchronous LangGraph nodes."""
     try:
+        #The eventloop manager that coordinates asynchronous operations
+        #Is there already an event loop running in this thread?
         asyncio.get_running_loop()
     except RuntimeError:
+        #There is no event loop, so create one, run my async operation, wait for it to finish, and return the result.
         return asyncio.run(coro)
 
     # FastAPI may already have an event loop. Run the MCP coroutine in a
     # short-lived worker thread so the synchronous graph can safely block.
+    #a separate worker thread.
+    #Main thread->FastAPI Event Loop. 
+    #Worker thread->New Event Loop
     with ThreadPoolExecutor(max_workers=1) as executor:
         return executor.submit(lambda: asyncio.run(coro)).result()
 

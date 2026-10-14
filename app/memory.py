@@ -12,7 +12,7 @@ SECRET_PATTERNS = (
     "private key", "credential",
 )
 
-
+#converts text into a set of normalized words. to a set , no overlap
 def _tokens(text: str) -> set[str]:
     return set(re.findall(r"[a-z0-9_]+", text.lower()))
 
@@ -27,10 +27,12 @@ def recall_memories(username: str, query: str, limit: int = 5) -> list[dict]:
             Memory.importance.desc(), Memory.updated_at.desc()
         ).limit(100).all()
         scored = []
+        #Only memories with at least one matching word are considered.
         for row in rows:
             overlap = len(q & _tokens(f"{row.memory_key} {row.value}"))
             if overlap:
                 scored.append((overlap, row))
+        #If two memories have the same overlap, the one with higher importance comes first.
         scored.sort(key=lambda x: (x[0], x[1].importance), reverse=True)
         return [
             {"key": row.memory_key, "value": row.value, "importance": row.importance}
@@ -56,6 +58,7 @@ def save_explicit_memory(username: str, message: str) -> dict | None:
         r"i prefer\s+(.+)",
         r"my preference is\s+(.+)",
     ]
+    #:= walrus operator. It allows you to assign m while checking the condition.
     value = next((m.group(1).strip() for p in patterns if (m := re.search(p, message, re.I))), None)
     if not value or len(value) > 500:
         return None

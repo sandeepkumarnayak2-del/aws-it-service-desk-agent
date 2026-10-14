@@ -67,6 +67,14 @@ class TicketAgent(BaseAgent):
         # ---------------------------------------------------------
         # Keep the current request separate from checkpoint history.
         # The authenticated identity is always supplied by the app.
+        #
+        # IMPORTANT:
+        # Bedrock can represent AIMessage.content as a list containing
+        # both text blocks and raw tool_use blocks. Replaying those
+        # raw blocks without their corresponding ToolMessage causes
+        # Bedrock Converse to reject subsequent requests.
+        #
+        # Preserve only natural-language text from prior AI messages.
         history = []
 
         for item in (prior_messages or [])[-6:]:
@@ -77,12 +85,31 @@ class TicketAgent(BaseAgent):
                 continue
 
             if item_type == "human" and content != message:
-                history.append(HumanMessage(content=content))
+                history.append(
+                    HumanMessage(content=content)
+                )
 
             elif item_type == "ai":
-                # Keep only the assistant's natural-language response.
-                # Do not replay previous tool_calls into Groq.
-                history.append(AIMessage(content=content))
+
+                if isinstance(content, str):
+                    text_content = content
+
+                elif isinstance(content, list):
+                    text_content = "\n".join(
+                        block.get("text", "")
+                        for block in content
+                        if isinstance(block, dict)
+                        and block.get("type") == "text"
+                        and isinstance(block.get("text"), str)
+                    )
+
+                else:
+                    text_content = ""
+
+                if text_content.strip():
+                    history.append(
+                        AIMessage(content=text_content)
+                    )
 
         messages = [
             *history,
@@ -167,7 +194,7 @@ Transport: {transport}
 
             messages.append(ai)
 
-            calls = getattr(ai, "tool_calls", [])
+            calls = getattr(ai, "tool_calls", []) or []
 
             # -----------------------------------------------------
             # No tool call -> final answer
@@ -190,7 +217,11 @@ Transport: {transport}
                 tool_name = call["name"]
 
                 selected = next(
-                    (t for t in tools if t.name == tool_name),
+                    (
+                        t
+                        for t in tools
+                        if t.name == tool_name
+                    ),
                     None,
                 )
 
@@ -234,7 +265,9 @@ Transport: {transport}
                         }
 
                     else:
-                        args = dict(call.get("args", {}))
+                        args = dict(
+                            call.get("args", {})
+                        )
 
                         # Local tools need the authenticated identity
                         # explicitly. MCP tools already have username

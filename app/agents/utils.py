@@ -1,7 +1,7 @@
 """Deterministic routing, evidence and action helpers used around LLM decisions."""
 from __future__ import annotations
 
-
+#“Show my tickets” this kind of. - User-direct route-tickets
 def direct_route(message: str) -> str | None:
     """Return a safe deterministic route for unambiguous read-only requests.
 
@@ -41,7 +41,7 @@ def direct_route(message: str) -> str | None:
 
     return None
 
-
+#user   to be asking for investigation/research.
 def external_or_investigation_requested(message: str) -> bool:
     text = message.lower()
     markers = (
@@ -51,7 +51,7 @@ def external_or_investigation_requested(message: str) -> bool:
     )
     return any(m in text for m in markers)
 
-
+#Which terms overlap. 
 def relevant_terms(question: str, docs: list[dict]) -> list[str]:
     """Return meaningful query terms that overlap retrieved document text.
 
@@ -88,7 +88,7 @@ def relevant_terms(question: str, docs: list[dict]) -> list[str]:
 
     return sorted(overlaps)
 
-
+#Is there enough lexical evidence to consider the document relevant   or not
 def has_relevant_docs(question: str, docs: list[dict]) -> bool:
     """Conservative relevance gate for enterprise RAG.
 

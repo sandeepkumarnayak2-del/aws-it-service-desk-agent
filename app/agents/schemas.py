@@ -3,6 +3,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 class RoutingDecision(BaseModel):
+    #Literal for Fixed set of choices
     agent: Literal["knowledge", "ticket", "action", "general", "investigation"] = Field(
         description="Specialist owning the request."
     )
